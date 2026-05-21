@@ -141,11 +141,28 @@ plugins/DuskVerb/tests/reference_comparison
 tests/test_linear_phase
 tests/velvet90_match/
 
-# DuskAmp DSP comparison artifacts (regenerated locally per developer)
-plugins/DuskAmp/tests/comparison/
+# DuskAmp DSP comparison runtime artifacts (regenerated locally per developer)
+# Scripts, schematics, and committed baseline reports under results/ stay tracked.
+plugins/DuskAmp/tests/comparison/dsp_test_output/
+plugins/DuskAmp/tests/comparison/signals/
+
+# DuskAmp bundled cab IRs — every WAV needs documented per-IR
+# redistribution permission (see plugins/DuskAmp/resources/cabs/LICENSES.md
+# and README.md). Default-deny: any new WAV gets ignored unless explicitly
+# allowlisted below, so an undocumented file can't accidentally ship in a
+# release artifact.
+plugins/DuskAmp/resources/cabs/*.wav
+# Soundwoofer-sourced IRs — redistribution permission confirmed; see
+# plugins/DuskAmp/resources/cabs/LICENSES.md for per-file attribution.
+!plugins/DuskAmp/resources/cabs/fender_twin_sm57_oa.wav
+!plugins/DuskAmp/resources/cabs/marshall_1960vb_sm57_oa.wav
+!plugins/DuskAmp/resources/cabs/marshall_1960vb_sm57_off.wav
+!plugins/DuskAmp/resources/cabs/vox_ac15_sm57.wav
+!plugins/DuskAmp/resources/cabs/vox_ac15_se4_close.wav
 
 # DuskVerb calibration database (local tooling artifact)
 calibration.db
 calibration.db-shm
 calibration.db-wal
 .claude/
+plugins/neural-amp/

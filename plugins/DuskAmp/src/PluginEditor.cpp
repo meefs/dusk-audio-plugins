@@ -4,10 +4,37 @@
 #include "FactoryPresets.h"
 #include "ParamIDs.h"
 #include "CrashLog.h"
+#include "dsp/CabinetLibrary.h"
+#include "../../shared/DuskLookAndFeel.h"   // ValueEditor::popUp
 
 // =============================================================================
 // KnobWithLabel
 // =============================================================================
+
+namespace
+{
+    // Pulled out so rebindToParam() can re-apply the formatter without
+    // duplicating the lambda body. juce::AudioProcessorValueTreeState::
+    // SliderAttachment overwrites textFromValueFunction on construction,
+    // so any rebind has to re-set the formatter immediately afterwards.
+    void applySuffixFormatter (juce::Slider& s, const juce::String& sfx)
+    {
+        s.textFromValueFunction = [sfx] (double v)
+        {
+            if (sfx == " dB")   return juce::String (v, 1) + " dB";
+            if (sfx == " ms")   return juce::String (juce::roundToInt (v)) + " ms";
+            if (sfx == " Hz")
+                return v >= 1000.0 ? juce::String (v / 1000.0, 2) + " kHz"
+                                   : v < 100.0 ? juce::String (v, 2) + " Hz"
+                                               : juce::String (juce::roundToInt (v)) + " Hz";
+            if (sfx == " s")
+                return v < 1.0 ? juce::String (juce::roundToInt (v * 1000.0)) + " ms"
+                               : juce::String (v, 2) + " s";
+            if (sfx == "%")     return juce::String (v * 100.0, 1) + "%";
+            return juce::String (v, 2);
+        };
+    }
+}
 
 void KnobWithLabel::init (juce::Component& parent,
                           juce::AudioProcessorValueTreeState& apvts,
@@ -18,6 +45,9 @@ void KnobWithLabel::init (juce::Component& parent,
 {
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
     slider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
+    // Disable JUCE's built-in double-click-resets-to-default. We use double-
+    // click for the value-editor popup instead (see ValueEditorTrigger below).
+    slider.setDoubleClickReturnValue (false, 0.0);
     if (tooltip.isNotEmpty())
         slider.setTooltip (tooltip);
     parent.addAndMakeVisible (slider);
@@ -31,11 +61,31 @@ void KnobWithLabel::init (juce::Component& parent,
     parent.addAndMakeVisible (nameLabel);
 
     valueLabel.setJustificationType (juce::Justification::centred);
-    valueLabel.setInterceptsMouseClicks (false, false);
+    valueLabel.setInterceptsMouseClicks (true, false);
     valueLabel.setFont (juce::FontOptions (11.0f));
     valueLabel.setColour (juce::Label::textColourId,
                           juce::Colour (DuskAmpLookAndFeel::kValueText));
     parent.addAndMakeVisible (valueLabel);
+
+    // Double-click → spawn ValueEditor popup over the value label. Both the
+    // knob and the value label trigger it; editor anchors over the value
+    // label so it lands exactly on the visible text.
+    struct ValueEditorTrigger : public juce::MouseListener
+    {
+        juce::Slider* slider = nullptr;
+        juce::Component* anchor = nullptr;
+        void mouseDoubleClick (const juce::MouseEvent&) override
+        {
+            if (slider != nullptr && anchor != nullptr)
+                ValueEditor::popUp (*slider, *anchor);
+        }
+    };
+    valueEditorTrigger = std::make_unique<ValueEditorTrigger>();
+    auto* trig = static_cast<ValueEditorTrigger*> (valueEditorTrigger.get());
+    trig->slider = &slider;
+    trig->anchor = &valueLabel;
+    slider    .addMouseListener (trig, false);
+    valueLabel.addMouseListener (trig, false);
 
     // Store suffix in name field for formatting
     valueLabel.setName (suffix);
@@ -43,22 +93,18 @@ void KnobWithLabel::init (juce::Component& parent,
     attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         apvts, paramID, slider);
 
-    // Set textFromValueFunction AFTER attachment (attachment overwrites it)
-    auto sfx = suffix;
-    slider.textFromValueFunction = [sfx] (double v)
-    {
-        if (sfx == " dB")   return juce::String (v, 1) + " dB";
-        if (sfx == " ms")   return juce::String (juce::roundToInt (v)) + " ms";
-        if (sfx == " Hz")
-            return v >= 1000.0 ? juce::String (v / 1000.0, 2) + " kHz"
-                               : v < 100.0 ? juce::String (v, 2) + " Hz"
-                                           : juce::String (juce::roundToInt (v)) + " Hz";
-        if (sfx == " s")
-            return v < 1.0 ? juce::String (juce::roundToInt (v * 1000.0)) + " ms"
-                           : juce::String (v, 2) + " s";
-        if (sfx == "%")     return juce::String (v * 100.0, 1) + "%";
-        return juce::String (v, 2);
-    };
+    applySuffixFormatter (slider, suffix);
+}
+
+void KnobWithLabel::rebindToParam (juce::AudioProcessorValueTreeState& apvts,
+                                    const juce::String& newParamID)
+{
+    // Destroy the old attachment first so it stops listening to the old
+    // parameter before the new one starts.
+    attachment.reset();
+    attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+        apvts, newParamID, slider);
+    applySuffixFormatter (slider, valueLabel.getName());   // suffix stored in init()
 }
 
 // =============================================================================
@@ -218,6 +264,20 @@ DuskAmpEditor::DuskAmpEditor (DuskAmpProcessor& p)
     outputLevel_   .init (*this, params, DuskAmpParams::OUTPUT_LEVEL,    "OUTPUT",     " dB",
         "Master output level");
 
+    // If the plugin is restored already in NAM mode, the init() above bound
+    // the input/output knobs to the DSP-mode params — rebind to the NAM
+    // params before the editor first paints so the user sees the correct
+    // saved values for their current mode. Subsequent mode switches go
+    // through the timerCallback rebind path below.
+    {
+        bool startsInNamMode = params.getRawParameterValue (DuskAmpParams::AMP_MODE)->load() >= 0.5f;
+        if (startsInNamMode)
+        {
+            inputGain_.rebindToParam   (params, DuskAmpParams::NAM_INPUT_GAIN);
+            outputLevel_.rebindToParam (params, DuskAmpParams::NAM_OUTPUT_LEVEL);
+        }
+    }
+
     // --- Mode selector (DSP / NAM) ---
     auto* modeParam = params.getParameter (DuskAmpParams::AMP_MODE);
     jassert (modeParam != nullptr);
@@ -244,6 +304,16 @@ DuskAmpEditor::DuskAmpEditor (DuskAmpProcessor& p)
     addAndMakeVisible (cabEnabled_);
     cabEnabledAttachment_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
         params, DuskAmpParams::CAB_ENABLED, cabEnabled_);
+
+    // --- Bundled-IR preset picker. Choices come from CabinetLibrary so this
+    //     stays in sync with the APVTS choice list automatically. ---
+    for (int i = 0; i < CabinetLibrary::numChoices(); ++i)
+        cabPresetBox_.addItem (CabinetLibrary::displayNameForChoice (i), i + 1);
+    cabPresetBox_.setJustificationType (juce::Justification::centredLeft);
+    cabPresetBox_.setTooltip ("Bundled cabinet IR — pick a starter cab without loading a file");
+    addAndMakeVisible (cabPresetBox_);
+    cabPresetAttachment_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+        params, DuskAmpParams::CAB_PRESET, cabPresetBox_);
 
     // --- Cab browser ---
     cabBrowser_.onFileSelected = [this] (const juce::File& file)
@@ -479,6 +549,8 @@ void DuskAmpEditor::timerCallback()
     cabMix_.setDimmed (cabOff);
     cabHiCut_.setDimmed (cabOff);
     cabLoCut_.setDimmed (cabOff);
+    cabPresetBox_.setEnabled (! cabOff);
+    cabPresetBox_.setAlpha (cabOff ? 0.4f : 1.0f);
     cabBrowser_.setEnabled (! cabOff);
     cabBrowser_.setAlpha (cabOff ? 0.4f : 1.0f);
 
@@ -503,6 +575,18 @@ void DuskAmpEditor::timerCallback()
 
     if (namMode != layoutIsNamMode_)
     {
+        // Rebind input/output knobs to the per-mode params so each
+        // AMP_MODE has its own persistent volume settings — switching
+        // modes must NEVER produce a sudden volume jump (NAM models
+        // typically run hotter than DSP and a unified knob would let
+        // the user dial a safe level in one mode and get blasted in
+        // the other on switch).
+        inputGain_.rebindToParam (processorRef.parameters,
+                                   namMode ? DuskAmpParams::NAM_INPUT_GAIN
+                                            : DuskAmpParams::INPUT_GAIN);
+        outputLevel_.rebindToParam (processorRef.parameters,
+                                     namMode ? DuskAmpParams::NAM_OUTPUT_LEVEL
+                                              : DuskAmpParams::OUTPUT_LEVEL);
         resized();
         repaint();
     }
@@ -815,13 +899,21 @@ void DuskAmpEditor::resized()
             { { &preampGain_, mediumKnob }, { &bass_, mediumKnob },
               { &mid_, mediumKnob }, { &treble_, mediumKnob } }, sf);
 
-        // Controls row: amp type + bright
+        // Controls row: amp type combo (left, ~60% of row) + BRIGHT button
+        // (right, ~40%). The previous 50/50 split had the combo's right edge
+        // butting up against the BRIGHT button — visibly cramped and the
+        // combo's "British Crunch" label overran the button at typical
+        // widths. Wider gap + asymmetric split fixes both.
         {
-            int ctrlY = mainY + ampToneH - controlsH - scaler_.scaled (2);
-            int ctrlW = (centerW - scaler_.scaled (16) - controlsGap) / 2;
-            int ctrlX = centerX + scaler_.scaled (8);
-            ampTypeBox_.setBounds (ctrlX, ctrlY, ctrlW, controlsH);
-            brightButton_.setBounds (ctrlX + ctrlW + controlsGap, ctrlY, ctrlW, controlsH);
+            int margin     = scaler_.scaled (8);
+            int rowGap     = scaler_.scaled (16);
+            int ctrlY      = mainY + ampToneH - controlsH - scaler_.scaled (2);
+            int rowW       = centerW - margin * 2 - rowGap;
+            int comboW     = (rowW * 60) / 100;          // 60% to combo
+            int buttonW    = rowW - comboW;              // 40% to BRIGHT
+            int ctrlX      = centerX + margin;
+            ampTypeBox_.setBounds (ctrlX, ctrlY, comboW, controlsH);
+            brightButton_.setBounds (ctrlX + comboW + rowGap, ctrlY, buttonW, controlsH);
         }
 
         // Power amp
@@ -844,16 +936,33 @@ void DuskAmpEditor::resized()
     int toggleH = scaler_.scaled (22);
     int pad = scaler_.scaled (8);
 
-    // 4-column layout: boost (15%) | cab (35%) | delay (25%) | reverb (25%)
-    int boostW  = static_cast<int> (contentW * 0.15f);
-    int cabW    = static_cast<int> (contentW * 0.35f);
-    int delayW  = static_cast<int> (contentW * 0.25f);
-    int reverbW = contentW - boostW - cabW - delayW - gap * 3;
+    // 4-column layout: cab gets the lion's share of the bottom row so the
+    // IR-name combo + cab browser have unrestricted room (full cab IR
+    // names like "Marshall 1960VB — SM57 OA" need ~250 px). The three
+    // effect sections to the right share matching small knobs (effectKnob),
+    // so DELAY and REVERB don't need extra width to fit oversized knobs.
+    int cabW    = static_cast<int> (contentW * 0.50f);
+    int boostW  = static_cast<int> (contentW * 0.14f);
+    int delayW  = static_cast<int> (contentW * 0.17f);
+    int reverbW = contentW - cabW - boostW - delayW - gap * 3;
 
-    int boostX  = contentX;
-    int cabX    = boostX + boostW + gap;
-    int delayX  = cabX + cabW + gap;
+    int cabX    = contentX;
+    int boostX  = cabX + cabW + gap;
+    int delayX  = boostX + boostW + gap;
     int reverbX = delayX + delayW + gap;
+
+    // All four bottom-row sections paint a title strip in their top ~20 px
+    // (drawGroupBox titleArea = bounds.withHeight(20)). The internal
+    // toggle / combo / knob layout must start *below* that strip,
+    // otherwise the section's "CAB / BOOST / DELAY / REVERB" toggle
+    // button text overlaps the matching group title above it.
+    int titleSpace = scaler_.scaled (22);
+
+    // Effect knob size — kept small and uniform across BOOST / DELAY /
+    // REVERB so the user gets a consistent visual rhythm and the
+    // sections can be packed tighter (which is what gave CAB its extra
+    // width). Capped by per-section column width below.
+    int effectKnob = scaler_.scaled (40);
 
     boostGroupBounds_  = { boostX, bottomY, boostW, bottomH };
     cabGroupBounds_    = { cabX, bottomY, cabW, bottomH };
@@ -863,59 +972,78 @@ void DuskAmpEditor::resized()
     // BOOST section: toggle + 3 knobs
     {
         int innerX = boostX + pad;
-        int innerY = bottomY + pad;
+        int innerY = bottomY + titleSpace;
         boostEnabled_.setBounds (innerX, innerY, toggleW, toggleH);
         int kY = innerY + toggleH + scaler_.scaled (4);
-        int kH = bottomH - toggleH - pad * 2 - scaler_.scaled (4);
+        int kH = bottomH - titleSpace - toggleH - pad - scaler_.scaled (4);
         int colW = (boostW - pad * 2) / 3;
-        int knobSize = std::min (smallKnob, colW - scaler_.scaled (4));
+        int knobSize = std::min (effectKnob, colW - scaler_.scaled (4));
         placeKnob (boostGain_,  { innerX, kY, colW, kH }, knobSize, sf);
         placeKnob (boostTone_,  { innerX + colW, kY, colW, kH }, knobSize, sf);
         placeKnob (boostLevel_, { innerX + 2 * colW, kY, colW, kH }, knobSize, sf);
     }
 
-    // CABINET section: toggle + 3 knobs | browser
+    // CABINET section: CAB toggle (top-left), 3 EQ knobs (lower-left).
+    // Right column groups the IR-selection mechanisms vertically:
+    // cabPresetBox_ (bundled IR picker) on top, cabBrowser_ (user-loaded
+    // file browser) below. Both answer "which IR is loaded" so they
+    // belong together; the previous layout had the combo overlap the
+    // browser's "Cabinet IRs" header on the same row.
     {
         int innerX = cabX + pad;
-        int innerY = bottomY + pad;
+        int innerY = bottomY + titleSpace;
         cabEnabled_.setBounds (innerX, innerY, toggleW, toggleH);
+
+        // Lower-left: 3 cab EQ knobs (use effectKnob to match boost)
         int kY = innerY + toggleH + scaler_.scaled (4);
-        int kH = bottomH - toggleH - pad * 2 - scaler_.scaled (4);
-        int knobColW = scaler_.scaled (62);
-        placeKnob (cabMix_,   { innerX, kY, knobColW, kH }, smallKnob, sf);
-        placeKnob (cabHiCut_, { innerX + knobColW, kY, knobColW, kH }, smallKnob, sf);
-        placeKnob (cabLoCut_, { innerX + 2 * knobColW, kY, knobColW, kH }, smallKnob, sf);
-        int browserX = innerX + 3 * knobColW + scaler_.scaled (4);
-        int browserW = cabX + cabW - browserX - pad;
-        cabBrowser_.setBounds (browserX, bottomY + pad, browserW, bottomH - pad * 2);
+        int kH = bottomH - titleSpace - toggleH - pad - scaler_.scaled (4);
+        int knobColW = scaler_.scaled (52);
+        placeKnob (cabMix_,   { innerX, kY, knobColW, kH }, effectKnob, sf);
+        placeKnob (cabHiCut_, { innerX + knobColW, kY, knobColW, kH }, effectKnob, sf);
+        placeKnob (cabLoCut_, { innerX + 2 * knobColW, kY, knobColW, kH }, effectKnob, sf);
+
+        // Right column: combo above browser. With CAB at 50% of contentW
+        // the right sub-column is now ~250 px wide — full IR display
+        // names ("Marshall 1960VB — SM57 OA" class) fit without
+        // truncation.
+        int rightX     = innerX + 3 * knobColW + scaler_.scaled (4);
+        int rightW     = cabX + cabW - rightX - pad;
+        int comboH     = toggleH;
+        int comboGap   = scaler_.scaled (4);
+        cabPresetBox_.setBounds (rightX, bottomY + titleSpace, rightW, comboH);
+        cabBrowser_.setBounds   (rightX,
+                                  bottomY + titleSpace + comboH + comboGap,
+                                  rightW,
+                                  bottomH - titleSpace - comboH - comboGap - pad);
     }
 
     // DELAY section: toggle + type selector + 3 knobs
     {
         int innerX = delayX + pad;
-        int innerY = bottomY + pad;
+        int innerY = bottomY + titleSpace;
         delayEnabled_.setBounds (innerX, innerY, toggleW, toggleH);
         int typeW = delayW - pad * 2 - toggleW - scaler_.scaled (4);
         delayTypeBox_.setBounds (innerX + toggleW + scaler_.scaled (4), innerY, typeW, toggleH);
         int kY = innerY + toggleH + scaler_.scaled (4);
-        int kH = bottomH - toggleH - pad * 2 - scaler_.scaled (4);
+        int kH = bottomH - titleSpace - toggleH - pad - scaler_.scaled (4);
         int colW = (delayW - pad * 2) / 3;
-        placeKnob (delayTime_,     { innerX, kY, colW, kH }, smallKnob, sf);
-        placeKnob (delayFeedback_, { innerX + colW, kY, colW, kH }, smallKnob, sf);
-        placeKnob (delayMix_,      { innerX + 2 * colW, kY, colW, kH }, smallKnob, sf);
+        int knobSize = std::min (effectKnob, colW - scaler_.scaled (4));
+        placeKnob (delayTime_,     { innerX, kY, colW, kH }, knobSize, sf);
+        placeKnob (delayFeedback_, { innerX + colW, kY, colW, kH }, knobSize, sf);
+        placeKnob (delayMix_,      { innerX + 2 * colW, kY, colW, kH }, knobSize, sf);
     }
 
     // REVERB section: toggle + 5 knobs (2 rows: 3 top, 2 bottom)
     {
         int innerX = reverbX + pad;
-        int innerY = bottomY + pad;
+        int innerY = bottomY + titleSpace;
         reverbEnabled_.setBounds (innerX, innerY, toggleW, toggleH);
         int kY = innerY + toggleH + scaler_.scaled (4);
-        int kH = bottomH - toggleH - pad * 2 - scaler_.scaled (4);
+        int kH = bottomH - titleSpace - toggleH - pad - scaler_.scaled (4);
         int rowH = kH / 2;
         int colW3 = (reverbW - pad * 2) / 3;
         int colW2 = (reverbW - pad * 2) / 2;
-        int knobSize = std::min (smallKnob, colW3 - scaler_.scaled (4));
+        int knobSize = std::min (effectKnob, colW3 - scaler_.scaled (4));
         placeKnob (reverbMix_,      { innerX, kY, colW3, rowH }, knobSize, sf);
         placeKnob (reverbDecay_,    { innerX + colW3, kY, colW3, rowH }, knobSize, sf);
         placeKnob (reverbPreDelay_, { innerX + 2 * colW3, kY, colW3, rowH }, knobSize, sf);

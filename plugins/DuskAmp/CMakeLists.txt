@@ -65,7 +65,11 @@ juce_add_plugin(DuskAmp
     LV2URI "https://dusk-audio.github.io/plugins/duskamp"
     PRODUCT_NAME "DuskAmp"
     DESCRIPTION "Guitar amp simulator with DSP and NAM hybrid engine"
-    VST3_CAN_REPLACE_VST2 TRUE
+    VST3_CAN_REPLACE_VST2 FALSE   # DuskAmp has never shipped as VST2 — leaving
+                                  # this TRUE triggers JUCE's parameter-ID
+                                  # compatibility error (juce_audio_plugin_client_VST3.cpp:99)
+                                  # because legacy VST2 IDs would clash with the
+                                  # current VST3 hash-based IDs.
     VST3_AUTO_MANIFEST FALSE
 )
 
@@ -109,6 +113,7 @@ target_sources(DuskAmp
         src/dsp/ToneStackModel.cpp
         src/dsp/PowerAmp.cpp
         src/dsp/CabinetIR.cpp
+        src/dsp/CabinetLibrary.cpp
         src/dsp/PostFX.cpp
         ../shared/LEDMeter.cpp
         ${NAM_SOURCES}
@@ -125,6 +130,23 @@ if(NAM_ENABLED)
         PRIVATE
             src/dsp/NAMProcessor.cpp
     )
+endif()
+
+# Bundled cabinet IRs — embedded into the plugin binary so users get a
+# usable out-of-box cab without having to hunt for IRs. Drop CC0 /
+# explicitly-redistributable WAVs into resources/cabs/; the glob picks
+# them up at configure time. CabinetLibrary.cpp uses #ifdef checks on
+# JUCE_BINARYDATA_<stem>_wav to handle the empty / partial-set case
+# without compile errors.
+file(GLOB DUSKAMP_CAB_IRS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/cabs/*.wav")
+if(DUSKAMP_CAB_IRS)
+    juce_add_binary_data(DuskAmp_CabIRs SOURCES ${DUSKAMP_CAB_IRS})
+    target_link_libraries(DuskAmp PRIVATE DuskAmp_CabIRs)
+    list(LENGTH DUSKAMP_CAB_IRS _cab_count)
+    message(STATUS "DuskAmp: bundling ${_cab_count} cab IR(s) from resources/cabs/")
+else()
+    message(STATUS "DuskAmp: no bundled cab IRs (resources/cabs/ is empty); CAB_PRESET will only show '(none)'")
 endif()
 
 # Set include directories
@@ -149,6 +171,16 @@ target_compile_definitions(DuskAmp
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_DISPLAY_SPLASH_SCREEN=0
+        # cmake/GlobalSettings.cmake sets JUCE_VST3_CAN_REPLACE_VST2=1
+        # globally, but DuskAmp is a new plugin without a VST2 history
+        # — there's no automation data to migrate from a VST2 version
+        # because there is no VST2 version. Acknowledge the
+        # parameter-ID warning explicitly so JUCE's hard error
+        # (juce_audio_plugin_client_VST3.cpp:99) lets us build the
+        # VST3 wrapper. Per-target target_compile_definitions can't
+        # undo the directory-level add_compile_definitions, so we ack
+        # rather than override.
+        JUCE_IGNORE_VST3_MISMATCHED_PARAMETER_ID_WARNING=1
 )
 
 if(NAM_ENABLED)
@@ -200,3 +232,41 @@ set_target_properties(DuskAmp PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+
+# ---------------------------------------------------------------------------
+# Optional: standalone DSP test harness for accuracy/regression measurement.
+# Bypasses the JUCE plugin wrapper and instantiates PreampModel /
+# ToneStackModel / PowerAmp directly. Off by default — enable with
+#   cmake -DBUILD_DUSKAMP_DSP_TEST=ON ...
+# Pairs with plugins/DuskAmp/tests/comparison/{generate_test_signals.py,
+# analyze_dsp_output.py} for end-to-end physics validation.
+# ---------------------------------------------------------------------------
+option(BUILD_DUSKAMP_DSP_TEST "Build DuskAmp standalone DSP test harness" OFF)
+
+if(BUILD_DUSKAMP_DSP_TEST)
+    add_executable(DuskAmp_DSPTest
+        tests/comparison/dsp_test_harness.cpp
+        src/dsp/PreampModel.cpp
+        src/dsp/ToneStackModel.cpp
+        src/dsp/PowerAmp.cpp
+    )
+    target_include_directories(DuskAmp_DSPTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/dsp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared
+    )
+    target_link_libraries(DuskAmp_DSPTest PRIVATE
+        juce::juce_audio_formats
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_recommended_config_flags
+    )
+    target_compile_definitions(DuskAmp_DSPTest PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_STANDALONE_APPLICATION=1
+    )
+    set_target_properties(DuskAmp_DSPTest PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    )
+endif()

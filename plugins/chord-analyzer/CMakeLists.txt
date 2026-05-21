@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.15)
 include(${CMAKE_SOURCE_DIR}/cmake/PluginVersion.cmake)
 
 # Get version from git tag or CI environment (fallback to default version)
-set(CHORDANALYZER_DEFAULT_VERSION "1.1.1")
+set(CHORDANALYZER_DEFAULT_VERSION "1.1.4")
 get_plugin_version("chord-analyzer" CHORDANALYZER_VERSION)
 if(NOT CHORDANALYZER_VERSION OR CHORDANALYZER_VERSION STREQUAL "0.0.0")
     set(CHORDANALYZER_VERSION ${CHORDANALYZER_DEFAULT_VERSION})
@@ -155,6 +155,7 @@ juce_add_plugin(ChordAnalyzerMIDI
     PRODUCT_NAME "Chord Analyzer MIDI"
     VST3_CAN_REPLACE_VST2 FALSE
     VST3_AUTO_MANIFEST FALSE
+    VST3_CATEGORIES "Fx" "Instrument"
 )
 
 juce_generate_juce_header(ChordAnalyzerMIDI)

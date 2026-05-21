@@ -18,10 +18,20 @@ struct KnobWithLabel
     juce::Label  nameLabel;
     juce::Label  valueLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
+    std::unique_ptr<juce::MouseListener> valueEditorTrigger;
 
     void init (juce::Component& parent, juce::AudioProcessorValueTreeState& apvts,
                const juce::String& paramID, const juce::String& displayName,
                const juce::String& suffix, const juce::String& tooltip = {});
+
+    /** Recreate the slider's APVTS attachment so it tracks a different param.
+        Used when AMP_MODE switches between DSP and NAM — input/output knobs
+        bind to per-mode params (input_gain ↔ nam_input_gain, etc.) so each
+        mode has an independent persistent value. The formatting lambda is
+        re-applied here because juce::AudioProcessorValueTreeState::
+        SliderAttachment overwrites it on construction. */
+    void rebindToParam (juce::AudioProcessorValueTreeState& apvts,
+                        const juce::String& newParamID);
 
     void setDimmed (bool dimmed)
     {
@@ -120,6 +130,8 @@ private:
     // -- CABINET section --
     juce::ToggleButton cabEnabled_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> cabEnabledAttachment_;
+    juce::ComboBox cabPresetBox_;   // bundled-IR picker, sourced from CabinetLibrary
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> cabPresetAttachment_;
     KnobWithLabel cabMix_;
     KnobWithLabel cabHiCut_;
     KnobWithLabel cabLoCut_;

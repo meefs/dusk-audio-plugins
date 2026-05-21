@@ -92,6 +92,8 @@ private:
     std::atomic<float>* ampTypeParam_       = nullptr;
     std::atomic<float>* oversamplingParam_  = nullptr;
     std::atomic<float>* cabEnabledParam_    = nullptr;
+    std::atomic<float>* cabPresetParam_     = nullptr;
+    int                  lastCabPreset_      = -1;   // tracks reload-on-change
     std::atomic<float>* brightParam_        = nullptr;
     std::atomic<float>* boostEnabledParam_  = nullptr;
     std::atomic<float>* delayEnabledParam_  = nullptr;
@@ -100,6 +102,7 @@ private:
 
     // Continuous float parameter pointers
     std::atomic<float>* inputGainParam_      = nullptr;
+    std::atomic<float>* namInputGainParam_   = nullptr;
     std::atomic<float>* gateThresholdParam_  = nullptr;
     std::atomic<float>* gateReleaseParam_    = nullptr;
     std::atomic<float>* preampGainParam_     = nullptr;
@@ -125,6 +128,7 @@ private:
     std::atomic<float>* reverbDampingParam_  = nullptr;
     std::atomic<float>* reverbSizeParam_     = nullptr;
     std::atomic<float>* outputLevelParam_    = nullptr;
+    std::atomic<float>* namOutputLevelParam_ = nullptr;
 
     juce::AudioParameterBool* bypassParam_  = nullptr;
 
